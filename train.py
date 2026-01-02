@@ -6,31 +6,15 @@ from utils import *
 
 DEVICE = "cuda"
 DTYPE = t.bfloat16
-MODEL_ID = "qwen3-4b"
-
+MODEL_ID = "qwen3-1.7b"
 model = HookedTransformer.from_pretrained_no_processing(
     MODEL_ID,
     device=DEVICE,
     dtype=DTYPE,
 )
 
-#%%
+RUNNING_LOCAL = 'arch' in platform.release()
 
-from utils import get_model_response
-
-example_model_generation = False
-if example_model_generation:
-    # prompt = "What is the capital of France?"
-    # prompt = "How do you take a derivative of a function?"
-    # prompt = "if 2x + 3 = 11, what is x?"
-    
-    board_str = str(chess.Board("3q2k1/p6p/4ppp1/2p1Q3/2P5/4P1P1/r4P1P/1R4K1 w - - 0 27"))
-    prompt = f"Here's a chess position:\n{board_str}\nWhat's the best move?"
-    
-    response = get_model_response(model, prompt, max_new_tokens=64)
-    print(response)
-
-    t.cuda.empty_cache()
 
 #%%
 
@@ -48,11 +32,12 @@ class GRPOTraningConfig:
     batch_size: int
     lr: float
     group_size: int
-    kl_penalty: float
+    kl_beta: float
     prompt_format: str = "Here's a chess position:\n{position}\nWhat's the best move? Respond with only the move in UCI notation (like 'e2e4'), nothing else."
     
     invalid_move_reward: float = -100
     illegal_move_reward: float = -50
+    clip_eps: float = 0.05
 
     max_new_tokens: int = 256
     do_sample: bool = True
@@ -62,28 +47,35 @@ class GRPOTraningConfig:
 
 dataset = load_positions_dataset("data/positions_dataset_small.csv")
 
-#%%
+ref_model = HookedTransformer.from_pretrained_no_processing(
+    MODEL_ID,
+    device=DEVICE,
+    dtype=DTYPE,
+)
+ref_model.requires_grad_(False)
+ref_model.eval()
 
+#%%
 
 end_think_tok = "</think>"
 end_turn_tok = "<|im_end|>"
 end_think_tok_id = model.tokenizer.vocab[end_think_tok]
 end_turn_tok_id = model.tokenizer.vocab[end_turn_tok]
 
-engine = stockfish.Stockfish()
+engine_path = "/usr/bin/stockfish" if RUNNING_LOCAL else "/home/ehadley/.local/bin/stockfish"
+engine = stockfish.Stockfish(path=engine_path)
 engine.set_depth(10)
 
 cfg = GRPOTraningConfig(
     lr=3e-4,
     batch_size=4,
     group_size=2,
-    kl_penalty=0.01,
+    kl_beta=0.01,
 )
 
-model.requires_grad_(True)
-model.train()
+#%%
 
-for i, example in tqdm(dataset.iterrows(), desc="Training GRPO"):
+for i, example in tqdm(dataset.iterrows(), desc=f"{pink}Training"):
     with t.inference_mode():
         position = example["fen"]
         board = chess.Board(position)
@@ -136,11 +128,19 @@ for i, example in tqdm(dataset.iterrows(), desc="Training GRPO"):
         print(rewards)
 
         rewards = t.tensor(rewards, dtype=t.float32, device=model.cfg.device)
-        avg_reward = rewards.mean()
+        reward_mean = rewards.mean()
+        reward_std = rewards.std()
 
-        advantages = rewards - avg_reward
+        advantages = (rewards - reward_mean) / reward_std
         print(advantages.tolist())
+        
+        chosen_toks = completion_toks[:, prompt_len:]
 
+        ref_logits = ref_model(completion_toks)
+        ref_logprobs = t.log_softmax(ref_logits, dim=-1)
+        ref_chosen_tok_logprobs = ref_logprobs[:, prompt_len:].gather(2, chosen_toks.unsqueeze(-1)).squeeze(-1)
+
+    chosen_toks = chosen_toks.clone()
     advantages = advantages.clone()
     completion_toks = completion_toks.clone()
 
@@ -149,15 +149,21 @@ for i, example in tqdm(dataset.iterrows(), desc="Training GRPO"):
     print(logits.shape)
     print(logprobs.shape)
     print(completion_toks.shape)
-    # Use gather to select the logprobs associated with the chosen tokens after prompt
     
     # seq_indices = t.arange(prompt_len, prompt_len + completion_len).unsqueeze(0)
-    chosen_toks = completion_toks[:, prompt_len:]
     chosen_tok_logprobs = logprobs[:, prompt_len:].gather(2, chosen_toks.unsqueeze(-1)).squeeze(-1)
     print(chosen_toks)
     print(chosen_tok_logprobs)
-    x = chosen_tok_logprobs.sum()
-    x.backward()
+
+    prox = t.exp(chosen_tok_logprobs - ref_chosen_tok_logprobs)
+    print(prox)
+    prox_adv = prox*advantages.unsqueeze(-1)
+    print(prox_adv)
+    prox_clipped = t.min(prox_adv, t.clip(prox_adv, 1-cfg.clip_eps, 1+cfg.clip_eps))
+    print(prox_clipped)
+
+    kl_div = 
+    
     
     # print(chosen_tok_logprobs[0].tolist())
     # print(chosen_tok_logprobs[1].tolist())
