@@ -4,4 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "chess>=1.11.2",
+    "ipykernel>=7.1.0",
+    "ipython>=9.8.0",
+    "ipywidgets>=8.1.8",
+    "stockfish>=4.0.3",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    "transformer-lens>=2.16.1",
+]

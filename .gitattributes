@@ -1,0 +1,4 @@
+data filter=lfs diff=lfs merge=lfs -text
+data/gm_games_original.csv filter=lfs diff=lfs merge=lfs -text
+data/positions_dataset_sample.pkl filter=lfs diff=lfs merge=lfs -text
+data/positions_dataset_small.csv filter=lfs diff=lfs merge=lfs -text
